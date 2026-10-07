@@ -117,13 +117,23 @@ async fn flight_api_persists_updates_searches_and_health() {
     let (status, body) = send(
         &router,
         "GET",
-        "/api/v1/flight/search?pending_arrivals_at=ORD",
+        "/api/v1/flight/search?destination=ORD&aircraft=N200CA",
         None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["flights"].as_array().unwrap().len(), 1);
     assert_eq!(body["flights"][0]["flight_id"], "flight-2");
+
+    let (status, body) = send(
+        &router,
+        "GET",
+        "/api/v1/flight/search?pending_arrivals_at=ORD",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_request");
 
     let (status, body) = send(
         &router,

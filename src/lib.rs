@@ -92,12 +92,6 @@ impl FlightStore {
         if let Some(value) = &filters.aircraft {
             query.push(" AND aircraft = ").push_bind(value);
         }
-        if let Some(value) = &filters.pending_arrivals_at {
-            query
-                .push(" AND destination = ")
-                .push_bind(value)
-                .push(" AND actual_arrival IS NULL");
-        }
         if let Some(value) = filters.departure_from {
             query.push(" AND scheduled_departure >= ").push_bind(value);
         }
@@ -200,12 +194,12 @@ impl Flight {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlightSearch {
     pub source: Option<String>,
     pub destination: Option<String>,
     pub flight: Option<String>,
     pub aircraft: Option<String>,
-    pub pending_arrivals_at: Option<String>,
     pub departure_from: Option<DateTime<Utc>>,
     pub departure_to: Option<DateTime<Utc>>,
     pub arrival_from: Option<DateTime<Utc>>,

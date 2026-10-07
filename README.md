@@ -41,7 +41,7 @@ To run directly, set `DATABASE_URL` (default `postgres://adsb:adsb@localhost:543
 
 All fields except actual times and `aircraft` are required. Times use RFC 3339. Scheduled arrival must follow scheduled departure; if both actual times are set, actual arrival cannot precede actual departure. Airport codes must be nonempty and at most 8 characters.
 
-`GET /api/v1/flight/search` supports exact filters `source`, `destination`, `flight`, `aircraft`, and `pending_arrivals_at`. For example, `pending_arrivals_at=ORD` selects flights with destination ORD and no actual arrival. Inclusive scheduled time range filters are `departure_from`, `departure_to`, `arrival_from`, and `arrival_to` in RFC 3339. Pagination uses `limit` (default 100, maximum 500) and `offset` (default 0). Results are ordered by scheduled departure and flight ID and returned as `{"flights":[...],"pagination":{"limit":100,"offset":0,"returned":1}}`.
+`GET /api/v1/flight/search` supports exact filters `source`, `destination`, `flight`, and `aircraft`. Inclusive scheduled time range filters are `departure_from`, `departure_to`, `arrival_from`, and `arrival_to` in RFC 3339. Pagination uses `limit` (default 100, maximum 500) and `offset` (default 0). Results are ordered by scheduled departure and flight ID and returned as `{"flights":[...],"pagination":{"limit":100,"offset":0,"returned":1}}`.
 
 All errors use `{"error":{"code":"...","message":"..."}}`. Invalid bodies and filters return `400`; duplicate POST returns `409`; database failures return `500`.
 
@@ -52,7 +52,7 @@ curl -i -X POST http://localhost:8080/api/v1/flight \
   -H 'Content-Type: application/json' \
   --data '{"flight_id":"cna-run-42-flight-1","flight":"DL1234","source":"MSP","destination":"ORD","scheduled_departure":"2026-10-06T08:00:00Z","scheduled_arrival":"2026-10-06T09:30:00Z","aircraft":"N100CA"}'
 
-curl -s 'http://localhost:8080/api/v1/flight/search?pending_arrivals_at=ORD&aircraft=N100CA'
+curl -s 'http://localhost:8080/api/v1/flight/search?destination=ORD&aircraft=N100CA'
 ```
 
 ## Tests
