@@ -1,4 +1,4 @@
-use adsb::{app, AppState, FlightStore};
+use adsb::{app, AppState, FlightStore, ReportStore};
 use std::{env, net::SocketAddr};
 
 #[tokio::main]
@@ -8,12 +8,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     adsb::parse_database_url(&database_url).map_err(std::io::Error::other)?;
     let store = FlightStore::connect(&database_url).await?;
     store.migrate().await?;
+    let reports = ReportStore::new(store.pool().clone());
     let address: SocketAddr = env::var("LISTEN_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8080".into())
         .parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("ADS-B listening on {address}");
-    axum::serve(listener, app(AppState { store }))
+    axum::serve(listener, app(AppState { store, reports }))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
