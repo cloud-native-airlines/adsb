@@ -1,4 +1,4 @@
-use adsb::{app, AppState, FlightStore};
+use adsb::{app, AppState, FlightStore, ReportStore};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -78,6 +78,7 @@ async fn flight_api_persists_updates_searches_and_health() {
     };
     let router = app(AppState {
         store: db.store.clone(),
+        reports: ReportStore::new(db.store.pool().clone()),
     });
 
     let (status, body) = send(&router, "GET", "/healthz", None).await;
