@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         rejection::{JsonRejection, QueryRejection},
-        Query, State,
+        Path, Query, State,
     },
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -17,6 +17,7 @@ use std::str::FromStr;
 pub struct AppState {
     pub store: FlightStore,
     pub reports: ReportStore,
+    pub airports: AirportStore,
 }
 
 #[derive(Clone)]
@@ -306,6 +307,35 @@ impl ReportStore {
         builder.push(" OFFSET ").push_bind(offset);
         builder.build_query_as::<Report>().fetch_all(&self.pool).await
     }
+
+    /// Latest position per aircraft in a run, optionally restricted to a map
+    /// viewport (bbox) and/or a status. The latest report per aircraft is taken
+    /// first, then filtered — so an aircraft appears only if its *current*
+    /// position is inside the view.
+    pub async fn latest_positions(
+        &self,
+        run_id: &str,
+        bbox: Option<Bbox>,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Report>, sqlx::Error> {
+        let mut b = QueryBuilder::<Postgres>::new(
+            "WITH latest AS (\
+               SELECT DISTINCT ON (aircraft_id) run_id, report_id, tick_id, aircraft_id, flight_id, simulated_at, latitude, longitude, altitude_m, ground_speed_mps, heading_deg, status, received_at \
+               FROM reports WHERE run_id = ",
+        );
+        b.push_bind(run_id);
+        b.push(" ORDER BY aircraft_id, simulated_at DESC, tick_id DESC) SELECT * FROM latest WHERE TRUE");
+        if let Some(bb) = bbox {
+            b.push(" AND longitude BETWEEN ").push_bind(bb.min_lon).push(" AND ").push_bind(bb.max_lon);
+            b.push(" AND latitude BETWEEN ").push_bind(bb.min_lat).push(" AND ").push_bind(bb.max_lat);
+        }
+        if let Some(s) = status {
+            b.push(" AND status = ").push_bind(s);
+        }
+        b.push(" ORDER BY aircraft_id LIMIT ").push_bind(limit);
+        b.build_query_as::<Report>().fetch_all(&self.pool).await
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow, PartialEq)]
@@ -390,6 +420,122 @@ pub struct LatestQuery {
     pub aircraft_id: String,
 }
 
+/// A geographic bounding box (a map viewport).
+#[derive(Clone, Copy, Debug)]
+pub struct Bbox {
+    pub min_lon: f64,
+    pub min_lat: f64,
+    pub max_lon: f64,
+    pub max_lat: f64,
+}
+
+/// Parse a `min_lon,min_lat,max_lon,max_lat` bbox string. Does not handle
+/// antimeridian-crossing boxes (requires min_lon <= max_lon).
+pub fn parse_bbox(value: &str) -> Result<Bbox, &'static str> {
+    let parts: Vec<&str> = value.split(',').collect();
+    if parts.len() != 4 {
+        return Err("bbox must be min_lon,min_lat,max_lon,max_lat");
+    }
+    let mut nums = [0f64; 4];
+    for (i, part) in parts.iter().enumerate() {
+        nums[i] = part.trim().parse().map_err(|_| "bbox values must be numbers")?;
+    }
+    let bbox = Bbox { min_lon: nums[0], min_lat: nums[1], max_lon: nums[2], max_lat: nums[3] };
+    if !(-180.0..=180.0).contains(&bbox.min_lon) || !(-180.0..=180.0).contains(&bbox.max_lon) {
+        return Err("bbox longitudes must be in [-180, 180]");
+    }
+    if !(-90.0..=90.0).contains(&bbox.min_lat) || !(-90.0..=90.0).contains(&bbox.max_lat) {
+        return Err("bbox latitudes must be in [-90, 90]");
+    }
+    if bbox.min_lon > bbox.max_lon {
+        return Err("bbox min_lon must not exceed max_lon");
+    }
+    if bbox.min_lat > bbox.max_lat {
+        return Err("bbox min_lat must not exceed max_lat");
+    }
+    Ok(bbox)
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PositionsQuery {
+    pub run_id: String,
+    pub bbox: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Clone)]
+pub struct AirportStore {
+    pool: PgPool,
+}
+
+impl AirportStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// List airports, optionally restricted to a map viewport (bbox).
+    pub async fn list(&self, bbox: Option<Bbox>) -> Result<Vec<Airport>, sqlx::Error> {
+        let mut b = QueryBuilder::<Postgres>::new(
+            "SELECT code, name, latitude, longitude, elevation_m, icao, country FROM airports WHERE TRUE",
+        );
+        if let Some(bb) = bbox {
+            b.push(" AND longitude BETWEEN ").push_bind(bb.min_lon).push(" AND ").push_bind(bb.max_lon);
+            b.push(" AND latitude BETWEEN ").push_bind(bb.min_lat).push(" AND ").push_bind(bb.max_lat);
+        }
+        b.push(" ORDER BY code");
+        b.build_query_as::<Airport>().fetch_all(&self.pool).await
+    }
+
+    pub async fn get(&self, code: &str) -> Result<Option<Airport>, sqlx::Error> {
+        sqlx::query_as::<_, Airport>(
+            "SELECT code, name, latitude, longitude, elevation_m, icao, country FROM airports WHERE code = $1",
+        )
+        .bind(code)
+        .fetch_optional(&self.pool)
+        .await
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow, PartialEq)]
+pub struct Airport {
+    pub code: String,
+    pub name: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    #[serde(default)]
+    pub elevation_m: Option<f64>,
+    #[serde(default)]
+    pub icao: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+}
+
+impl Airport {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.code.trim().is_empty() || self.code.len() > 8 {
+            return Err("code must be between 1 and 8 characters");
+        }
+        if self.name.trim().is_empty() {
+            return Err("name must not be empty");
+        }
+        if !(-90.0..=90.0).contains(&self.latitude) {
+            return Err("latitude must be between -90 and 90");
+        }
+        if !(-180.0..=180.0).contains(&self.longitude) {
+            return Err("longitude must be between -180 and 180");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AirportQuery {
+    pub bbox: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("invalid request: {0}")]
@@ -444,6 +590,9 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/flight/search", get(search_flights))
         .route("/api/v1/reports", post(ingest_report).get(list_reports))
         .route("/api/v1/reports/latest", get(latest_report))
+        .route("/api/v1/positions", get(list_positions))
+        .route("/api/v1/airports", get(list_airports))
+        .route("/api/v1/airports/{code}", get(get_airport))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
@@ -605,6 +754,61 @@ async fn list_reports(
     })))
 }
 
+async fn list_positions(
+    State(state): State<AppState>,
+    query: Result<Query<PositionsQuery>, QueryRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Query(q) = query.map_err(|_| ApiError::Invalid("query parameters are invalid"))?;
+    if q.run_id.trim().is_empty() {
+        return Err(ApiError::Invalid("run_id is required"));
+    }
+    let bbox = match &q.bbox {
+        Some(value) => Some(parse_bbox(value).map_err(ApiError::Invalid)?),
+        None => None,
+    };
+    let limit = q.limit.unwrap_or(5000);
+    if !(1..=10000).contains(&limit) {
+        return Err(ApiError::Invalid("limit must be between 1 and 10000"));
+    }
+    let positions = state
+        .reports
+        .latest_positions(&q.run_id, bbox, q.status.as_deref(), limit)
+        .await
+        .map_err(|_| ApiError::Database)?;
+    let returned = positions.len();
+    Ok(Json(serde_json::json!({
+        "positions": positions,
+        "pagination": {"limit": limit, "returned": returned}
+    })))
+}
+
+async fn list_airports(
+    State(state): State<AppState>,
+    query: Result<Query<AirportQuery>, QueryRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Query(q) = query.map_err(|_| ApiError::Invalid("query parameters are invalid"))?;
+    let bbox = match &q.bbox {
+        Some(value) => Some(parse_bbox(value).map_err(ApiError::Invalid)?),
+        None => None,
+    };
+    let airports = state.airports.list(bbox).await.map_err(|_| ApiError::Database)?;
+    let returned = airports.len();
+    Ok(Json(serde_json::json!({
+        "airports": airports,
+        "pagination": {"returned": returned}
+    })))
+}
+
+async fn get_airport(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    match state.airports.get(&code).await.map_err(|_| ApiError::Database)? {
+        Some(airport) => Ok(Json(serde_json::json!({ "airport": airport }))),
+        None => Err(ApiError::NotFound("airport not found")),
+    }
+}
+
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     error
         .as_database_error()
@@ -737,5 +941,37 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn parses_and_validates_bbox() {
+        let bb = parse_bbox("-104,36,-80,49").unwrap();
+        assert_eq!((bb.min_lon, bb.min_lat, bb.max_lon, bb.max_lat), (-104.0, 36.0, -80.0, 49.0));
+        assert!(parse_bbox("1,2,3").is_err()); // too few
+        assert!(parse_bbox("a,2,3,4").is_err()); // not numbers
+        assert!(parse_bbox("10,2,-10,4").is_err()); // min_lon > max_lon
+        assert!(parse_bbox("-200,2,10,4").is_err()); // longitude out of range
+    }
+
+    #[test]
+    fn validates_airport_fields() {
+        let good = Airport {
+            code: "MSP".into(),
+            name: "Minneapolis–Saint Paul".into(),
+            latitude: 44.8848,
+            longitude: -93.2223,
+            elevation_m: None,
+            icao: None,
+            country: None,
+        };
+        assert!(good.validate().is_ok());
+
+        let mut bad = good.clone();
+        bad.code = String::new();
+        assert_eq!(bad.validate(), Err("code must be between 1 and 8 characters"));
+
+        let mut bad = good.clone();
+        bad.latitude = 91.0;
+        assert_eq!(bad.validate(), Err("latitude must be between -90 and 90"));
     }
 }
